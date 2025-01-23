@@ -163,8 +163,9 @@ func (c *Connection) Channel() (*Channel, error) {
 	}
 
 	channel := &Channel{
-		Channel: ch,
-		mutex:   &sync.Mutex{},
+		Channel:          ch,
+		mutex:            &sync.Mutex{},
+		reconnectOptions: c.reconnectOptions,
 	}
 
 	if c.reconnectOptions.Enabled {

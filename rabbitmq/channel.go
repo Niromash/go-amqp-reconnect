@@ -12,8 +12,9 @@ type Publishing amqp.Publishing
 
 type Channel struct {
 	*amqp.Channel
-	closed int32
-	mutex  *sync.Mutex
+	reconnectOptions DialReconnectOptions
+	closed           int32
+	mutex            *sync.Mutex
 
 	canceled int32
 
@@ -374,8 +375,12 @@ func (ch *Channel) Consume(queue, consumer string, autoAck, exclusive, noLocal, 
 			ch.mutex.Unlock()
 			if err != nil {
 				debugf("consume failed due [%s]", err)
-				time.Sleep(ReconnectDelay)
-				continue
+				if ch.reconnectOptions.Enabled {
+					time.Sleep(ch.reconnectOptions.ReconnectDelay)
+					continue
+				}
+				close(deliveries)
+				return
 			}
 
 			for msg := range d {
@@ -385,12 +390,13 @@ func (ch *Channel) Consume(queue, consumer string, autoAck, exclusive, noLocal, 
 			}
 
 			// sleep before IsClose call. closed flag may not set before sleep.
-			time.Sleep(ReconnectDelay)
+			if ch.reconnectOptions.Enabled {
+				time.Sleep(ch.reconnectOptions.ReconnectDelay)
+				if ch.isClosed() || ch.isCanceled() {
+					close(deliveries)
 
-			if ch.isClosed() || ch.isCanceled() {
-				close(deliveries)
-
-				break
+					break
+				}
 			}
 		}
 	}()
