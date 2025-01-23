@@ -1,2 +1,4 @@
+github.com/Niromash/go-amqp-reconnect/rabbitmq v0.0.0-20250123151604-a3dc45506244 h1:OGxg9w8U/yY/G/lGbZbkmA5oR1rCmkbgHaKSgaZ94Q0=
+github.com/Niromash/go-amqp-reconnect/rabbitmq v0.0.0-20250123151604-a3dc45506244/go.mod h1:laN9IFdsh7I+nU6c8eYdMz6N+YTTBSqMO79St4yza6A=
 github.com/rabbitmq/amqp091-go v1.10.0 h1:STpn5XsHlHGcecLmMFCtg7mqq0RnD+zFr4uzukfVhBw=
 github.com/rabbitmq/amqp091-go v1.10.0/go.mod h1:Hy4jKW5kQART1u+JkDTF9YYOQUHXqMuhrgxOEeS7G4o=
