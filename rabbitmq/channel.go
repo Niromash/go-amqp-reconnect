@@ -1,6 +1,7 @@
 package rabbitmq
 
 import (
+	"context"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -255,6 +256,12 @@ func (ch *Channel) Publish(exchange, key string, mandatory, immediate bool, msg 
 	defer ch.mutex.Unlock()
 	ch.mutex.Lock()
 	return ch.Channel.Publish(exchange, key, mandatory, immediate, amqp.Publishing(msg))
+}
+
+func (ch *Channel) PublishWithContext(ctx context.Context, exchange, key string, mandatory, immediate bool, msg Publishing) error {
+	defer ch.mutex.Unlock()
+	ch.mutex.Lock()
+	return ch.Channel.PublishWithContext(ctx, exchange, key, mandatory, immediate, amqp.Publishing(msg))
 }
 
 func (ch *Channel) ExchangeUnbind(destination, key, source string, noWait bool, args amqp.Table) error {
