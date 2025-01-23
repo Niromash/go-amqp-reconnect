@@ -11,101 +11,144 @@ import (
 )
 
 var Debug bool
-var ReconnectDelay = time.Second * 3
+var defaultReconnectConfig = DialReconnectOptions{
+	Enabled:        true,
+	ReconnectDelay: 3 * time.Second,
+}
 
 type Connection struct {
 	*amqp.Connection
-	closed int32
-	mutex  *sync.Mutex
+	closed           int32
+	mutex            *sync.Mutex
+	reconnectOptions DialReconnectOptions
 }
 
-func DialConfig(url string, config amqp.Config) (*Connection, error) {
+type DialReconnectOptions struct {
+	Enabled        bool
+	ReconnectDelay time.Duration
+}
+
+type DialReconnectOption func(*DialReconnectOptions)
+
+func WithDialReconnectEnabled(enabled bool) DialReconnectOption {
+	return func(o *DialReconnectOptions) {
+		o.Enabled = enabled
+	}
+}
+
+func WithDialReconnectDelay(delay time.Duration) DialReconnectOption {
+	return func(o *DialReconnectOptions) {
+		o.ReconnectDelay = delay
+	}
+}
+
+func DialConfig(url string, config amqp.Config, options ...DialReconnectOption) (*Connection, error) {
+	// Default reconnect options
+	reconnectOptions := defaultReconnectConfig
+
+	for _, o := range options {
+		o(&reconnectOptions)
+	}
+
 	conn, err := amqp.DialConfig(url, config)
 	if err != nil {
 		return nil, err
 	}
 
 	c := &Connection{
-		Connection: conn,
-		mutex:      &sync.Mutex{},
+		Connection:       conn,
+		mutex:            &sync.Mutex{},
+		reconnectOptions: reconnectOptions,
 	}
 
-	go func() {
-		for {
-			reason, ok := <-c.Connection.NotifyClose(make(chan *amqp.Error))
-			// exit this goroutine if closed by developer
-			if !ok {
-				debugf("connection closed")
-				break
-			}
-
-			debugf("connection closed, reason: %s", reason)
-
+	if reconnectOptions.Enabled {
+		go func() {
 			for {
-				// wait 1s for reconnect
-				time.Sleep(ReconnectDelay)
-
-				conn, err := amqp.DialConfig(url, config)
-				if err != nil {
-					debugf("reconnect failed, err: %v", err)
-					continue
+				reason, ok := <-c.Connection.NotifyClose(make(chan *amqp.Error))
+				// exit this goroutine if closed by developer
+				if !ok {
+					debugf("connection closed")
+					break
 				}
 
-				c.mutex.Lock()
-				c.Connection = conn
-				c.mutex.Unlock()
+				debugf("connection closed, reason: %s", reason)
 
-				debugf("reconnect success")
-				break
+				for {
+					// wait 1s for reconnect
+					time.Sleep(reconnectOptions.ReconnectDelay)
+
+					conn, err := amqp.DialConfig(url, config)
+					if err != nil {
+						debugf("reconnect failed, err: %v", err)
+						continue
+					}
+
+					c.mutex.Lock()
+					c.Connection = conn
+					c.mutex.Unlock()
+
+					debugf("reconnect success")
+					break
+				}
 			}
-		}
-	}()
+		}()
+	}
 
 	return c, nil
 }
 
-func Dial(url string) (*Connection, error) {
+func Dial(url string, options ...DialReconnectOption) (*Connection, error) {
+	// Default reconnect options
+	reconnectOptions := defaultReconnectConfig
+
+	for _, o := range options {
+		o(&reconnectOptions)
+	}
+
 	conn, err := amqp.Dial(url)
 	if err != nil {
 		return nil, err
 	}
 
 	c := &Connection{
-		Connection: conn,
-		mutex:      &sync.Mutex{},
+		Connection:       conn,
+		mutex:            &sync.Mutex{},
+		reconnectOptions: reconnectOptions,
 	}
 
-	go func() {
-		for {
-			reason, ok := <-c.Connection.NotifyClose(make(chan *amqp.Error))
-			// exit this goroutine if closed by developer
-			if !ok {
-				debugf("connection closed")
-				break
-			}
-
-			debugf("connection closed, reason: %s", reason)
-
-			// reconnect if not closed by developer
+	if reconnectOptions.Enabled {
+		go func() {
 			for {
-				// wait 1s for reconnect
-				time.Sleep(ReconnectDelay)
-
-				conn, err := amqp.Dial(url)
-				if err != nil {
-					debugf("reconnect failed, err: %v", err)
-					continue
+				reason, ok := <-c.Connection.NotifyClose(make(chan *amqp.Error))
+				// exit this goroutine if closed by developer
+				if !ok {
+					debugf("connection closed")
+					break
 				}
 
-				c.mutex.Lock()
-				c.Connection = conn
-				c.mutex.Unlock()
+				debugf("connection closed, reason: %s", reason)
 
-				debugf("reconnect success")
-				break
+				// reconnect if not closed by developer
+				for {
+					// wait 1s for reconnect
+					time.Sleep(reconnectOptions.ReconnectDelay)
+
+					conn, err := amqp.Dial(url)
+					if err != nil {
+						debugf("reconnect failed, err: %v", err)
+						continue
+					}
+
+					c.mutex.Lock()
+					c.Connection = conn
+					c.mutex.Unlock()
+
+					debugf("reconnect success")
+					break
+				}
 			}
-		}
-	}()
+		}()
+	}
 
 	return c, nil
 }
@@ -124,120 +167,121 @@ func (c *Connection) Channel() (*Channel, error) {
 		mutex:   &sync.Mutex{},
 	}
 
-	go func() {
-		for {
-			reason, ok := <-channel.Channel.NotifyClose(make(chan *amqp.Error))
-			// exit this goroutine if closed by developer
-			if !ok || channel.isClosed() {
-				debugf("channel closed")
-				channel.Close() // close again, ensure closed flag set when connection closed
-				break
-			}
-			debugf("channel closed, reason: %v", reason)
-
-			// reconnect if not closed by developer
+	if c.reconnectOptions.Enabled {
+		go func() {
 			for {
-				// wait 1s for connection reconnect
-				time.Sleep(ReconnectDelay) // Retry interval: Exponential backoff #2
-
-				if c.Connection.IsClosed() {
-					debugf("channel recreate failed, connection still closed")
-					continue
+				reason, ok := <-channel.Channel.NotifyClose(make(chan *amqp.Error))
+				// exit this goroutine if closed by developer
+				if !ok || channel.isClosed() {
+					debugf("channel closed")
+					channel.Close() // close again, ensure closed flag set when connection closed
+					break
 				}
+				debugf("channel closed, reason: %v", reason)
 
-				ch, err := c.Connection.Channel()
-				if err != nil {
-					debugf("channel recreate failed, err: %s", err)
-					continue
-				}
+				// reconnect if not closed by developer
+				for {
+					// wait 1s for connection reconnect
+					time.Sleep(c.reconnectOptions.ReconnectDelay) // Retry interval: Exponential backoff #2
 
-				// We need to apply Qos settings assigned with this channel
-				if channel.qos.applied {
-					err := ch.Qos(channel.qos.prefetchCount, channel.qos.prefetchSize, channel.qos.global)
-
-					if err != nil {
-						ch.Close()
-						debugf("channel recreate failed, unable to restore qos settings, err: %s (prefetch_count: %d; prefetch_size: %d; global: %t)", err, channel.qos.prefetchCount, channel.qos.prefetchSize, channel.qos.global)
+					if c.Connection.IsClosed() {
+						debugf("channel recreate failed, connection still closed")
 						continue
 					}
 
-					debugf("qos restored (prefetch_count: %d; prefetch_size: %d; global: %t)", channel.qos.prefetchCount, channel.qos.prefetchSize, channel.qos.global)
-				}
-
-				// We need to restore auto deleted queues created with this channel
-
-				queuesRestored := true
-
-				for _, q := range channel.autoDeletedQueues {
-					if q.passive {
-						_, err = ch.QueueDeclarePassive(q.name, q.durable, q.autoDelete, q.exclusive, q.noWait, q.args)
-					} else {
-						_, err = ch.QueueDeclare(q.name, q.durable, q.autoDelete, q.exclusive, q.noWait, q.args)
-					}
-
+					ch, err := c.Connection.Channel()
 					if err != nil {
-						debugf("channel recreate failed, unable to restore auto deleted queue, err: %v (name: %s; durable: %t; auto_delete: %t; exclusive: %t; no_wait: %t; passive: %t)", err, q.name, q.durable, q.autoDelete, q.exclusive, q.noWait, q.passive)
-						queuesRestored = false
-						break
+						debugf("channel recreate failed, err: %s", err)
+						continue
 					}
 
-					debugf("queue restored (name: %s; durable: %t; auto_delete: %t; exclusive: %t; no_wait: %t; passive: %t)", q.name, q.durable, q.autoDelete, q.exclusive, q.noWait, q.passive)
-				}
+					// We need to apply Qos settings assigned with this channel
+					if channel.qos.applied {
+						err := ch.Qos(channel.qos.prefetchCount, channel.qos.prefetchSize, channel.qos.global)
 
-				if !queuesRestored {
-					ch.Close()
-					continue
-				}
+						if err != nil {
+							ch.Close()
+							debugf("channel recreate failed, unable to restore qos settings, err: %s (prefetch_count: %d; prefetch_size: %d; global: %t)", err, channel.qos.prefetchCount, channel.qos.prefetchSize, channel.qos.global)
+							continue
+						}
 
-				exchangesRestored := true
-
-				for _, e := range channel.autoDeletedExchanges {
-					if e.passive {
-						err = ch.ExchangeDeclarePassive(e.name, e.kind, e.durable, e.autoDelete, e.internal, e.noWait, e.args)
-					} else {
-						err = ch.ExchangeDeclare(e.name, e.kind, e.durable, e.autoDelete, e.internal, e.noWait, e.args)
+						debugf("qos restored (prefetch_count: %d; prefetch_size: %d; global: %t)", channel.qos.prefetchCount, channel.qos.prefetchSize, channel.qos.global)
 					}
 
-					if err != nil {
-						debugf("channel recreate failed, unable to restore auto deleted exchange, err: %v (name: %s; kind: %s; durable: %t; auto_delete: %t; internal: %t; no_wait: %t)", err, e.name, e.kind, e.durable, e.autoDelete, e.internal, e.noWait)
-						exchangesRestored = false
-						break
+					// We need to restore auto deleted queues created with this channel
+
+					queuesRestored := true
+
+					for _, q := range channel.autoDeletedQueues {
+						if q.passive {
+							_, err = ch.QueueDeclarePassive(q.name, q.durable, q.autoDelete, q.exclusive, q.noWait, q.args)
+						} else {
+							_, err = ch.QueueDeclare(q.name, q.durable, q.autoDelete, q.exclusive, q.noWait, q.args)
+						}
+
+						if err != nil {
+							debugf("channel recreate failed, unable to restore auto deleted queue, err: %v (name: %s; durable: %t; auto_delete: %t; exclusive: %t; no_wait: %t; passive: %t)", err, q.name, q.durable, q.autoDelete, q.exclusive, q.noWait, q.passive)
+							queuesRestored = false
+							break
+						}
+
+						debugf("queue restored (name: %s; durable: %t; auto_delete: %t; exclusive: %t; no_wait: %t; passive: %t)", q.name, q.durable, q.autoDelete, q.exclusive, q.noWait, q.passive)
 					}
 
-					debugf("exchange restored (name: %s; kind: %s; durable: %t; auto_delete: %t; internal: %t; no_wait: %t)", e.name, e.kind, e.durable, e.autoDelete, e.internal, e.noWait)
-				}
-
-				if !exchangesRestored {
-					ch.Close()
-					continue
-				}
-
-				bindingsRestored := true
-
-				for _, b := range channel.autoDeletedQueueBindings {
-					if err := ch.QueueBind(b.queueName, b.key, b.exchangeName, b.noWait, b.args); err != nil {
-						debugf("channel recreate failed, unable to restore auto deleted queue or exchange binding, err: %v")
-						bindingsRestored = false
-						break
+					if !queuesRestored {
+						ch.Close()
+						continue
 					}
+
+					exchangesRestored := true
+
+					for _, e := range channel.autoDeletedExchanges {
+						if e.passive {
+							err = ch.ExchangeDeclarePassive(e.name, e.kind, e.durable, e.autoDelete, e.internal, e.noWait, e.args)
+						} else {
+							err = ch.ExchangeDeclare(e.name, e.kind, e.durable, e.autoDelete, e.internal, e.noWait, e.args)
+						}
+
+						if err != nil {
+							debugf("channel recreate failed, unable to restore auto deleted exchange, err: %v (name: %s; kind: %s; durable: %t; auto_delete: %t; internal: %t; no_wait: %t)", err, e.name, e.kind, e.durable, e.autoDelete, e.internal, e.noWait)
+							exchangesRestored = false
+							break
+						}
+
+						debugf("exchange restored (name: %s; kind: %s; durable: %t; auto_delete: %t; internal: %t; no_wait: %t)", e.name, e.kind, e.durable, e.autoDelete, e.internal, e.noWait)
+					}
+
+					if !exchangesRestored {
+						ch.Close()
+						continue
+					}
+
+					bindingsRestored := true
+
+					for _, b := range channel.autoDeletedQueueBindings {
+						if err := ch.QueueBind(b.queueName, b.key, b.exchangeName, b.noWait, b.args); err != nil {
+							debugf("channel recreate failed, unable to restore auto deleted queue or exchange binding, err: %v")
+							bindingsRestored = false
+							break
+						}
+					}
+
+					if !bindingsRestored {
+						ch.Close()
+						continue
+					}
+
+					channel.mutex.Lock()
+					channel.Channel = ch // Concurrency?
+					channel.mutex.Unlock()
+
+					debugf("channel recreate success")
+
+					break
 				}
-
-				if !bindingsRestored {
-					ch.Close()
-					continue
-				}
-
-				channel.mutex.Lock()
-				channel.Channel = ch // Concurrency?
-				channel.mutex.Unlock()
-
-				debugf("channel recreate success")
-
-				break
 			}
-		}
-
-	}()
+		}()
+	}
 
 	return channel, nil
 }
